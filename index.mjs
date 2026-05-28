@@ -193,50 +193,52 @@ export const handler = withDurableExecution(async (event, context) => {
      * Delete Successfully Sent Messages
      * ---------------------------------------------------
      */
-    await context.step(`Delete Messages From DLQ ${iteration}`, async () =>
-      trackMetric({
-        metricName: "DeleteMessagesLatency",
-        step: "delete",
-        fn: async (metrics) => {
-          const successfulIds = new Set(
-            (sendResult.Successful || []).map((message) => message.Id),
-          );
-          const deleteEntries = messages
-            .filter((message, index) => {
-              const id = message.MessageId || `${index}`;
-              return successfulIds.has(id);
-            })
-            .map((message, index) => ({
-              Id: message.MessageId || `${index}`,
-              ReceiptHandle: message.ReceiptHandle,
-            }));
-          if (deleteEntries.length === 0) {
-            console.log("No messages to delete");
-            return;
-          }
-          const response = await sqsClient.send(
-            new DeleteMessageBatchCommand({
-              QueueUrl: DLQ_URL,
-              Entries: deleteEntries,
-            }),
-          );
-          const successful = response.Successful?.length || 0;
-          const failed = response.Failed?.length || 0;
-          deletedSuccessMessagesCount += successful;
-          deletedFailedMessagesCount += failed;
-          processedCount += successful;
-          metrics.putMetric("MessagesDeleted", successful, Unit.Count);
-          metrics.putMetric("MessagesDeleteFailed", failed, Unit.Count);
-          console.log(`Deleted ${successful} messages`);
-          if (failed > 0) {
-            console.error(
-              "Delete failures",
-              JSON.stringify(response.Failed, null, 2),
+    const deleteResult = await context.step(
+      `Delete Messages From DLQ ${iteration}`,
+      async () =>
+        trackMetric({
+          metricName: "DeleteMessagesLatency",
+          step: "delete",
+          fn: async (metrics) => {
+            const successfulIds = new Set(
+              (sendResult.Successful || []).map((message) => message.Id),
             );
-          }
-          return response;
-        },
-      }),
+            const deleteEntries = messages
+              .filter((message, index) => {
+                const id = message.MessageId || `${index}`;
+                return successfulIds.has(id);
+              })
+              .map((message, index) => ({
+                Id: message.MessageId || `${index}`,
+                ReceiptHandle: message.ReceiptHandle,
+              }));
+            if (deleteEntries.length === 0) {
+              console.log("No messages to delete");
+              return;
+            }
+            const response = await sqsClient.send(
+              new DeleteMessageBatchCommand({
+                QueueUrl: DLQ_URL,
+                Entries: deleteEntries,
+              }),
+            );
+            const successful = response.Successful?.length || 0;
+            const failed = response.Failed?.length || 0;
+            deletedSuccessMessagesCount += successful;
+            deletedFailedMessagesCount += failed;
+            processedCount += successful;
+            metrics.putMetric("MessagesDeleted", successful, Unit.Count);
+            metrics.putMetric("MessagesDeleteFailed", failed, Unit.Count);
+            console.log(`Deleted ${successful} messages`);
+            if (failed > 0) {
+              console.error(
+                "Delete failures",
+                JSON.stringify(response.Failed, null, 2),
+              );
+            }
+            return response;
+          },
+        }),
     );
     /**
      * ---------------------------------------------------
@@ -244,12 +246,15 @@ export const handler = withDurableExecution(async (event, context) => {
      * ---------------------------------------------------
      */
     const batchLatency = performance.now() - batchStart;
-    console.log(`Batch completed in ${batchLatency.toFixed(2)} ms`);
+    console.log(`Batch completed in ${batchLatency.toFixed(2)} ms`, {
+      deleteResult,
+    });
     /**
      * ---------------------------------------------------
      * Prevent Endless Execution
      * ---------------------------------------------------
      */
+    await wait(context, iteration);
     if (iteration >= MAX_ITERATIONS) {
       console.log("Iteration limit reached");
       break;
@@ -303,3 +308,16 @@ export const handler = withDurableExecution(async (event, context) => {
     deletedFailedMessagesCount,
   };
 });
+
+async function wait(context, iteration) {
+  const timeLeft = context.lambdaContext.getRemainingTimeInMillis();
+  console.log(`timeLeft`, timeLeft);
+  const shouldWait = await context.step("calculate-wait", async () => {
+    return context.lambdaContext.getRemainingTimeInMillis() < 5000;
+  });
+
+  if (shouldWait) {
+    await context.wait({ seconds: 3 });
+  }
+  return false;
+}
